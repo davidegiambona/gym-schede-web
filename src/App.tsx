@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { dayNames, dayNamesLong, todayIndex } from "./lib/dates";
 import {
   loadSettings,
@@ -35,6 +36,13 @@ function capFirst(s: string) {
   return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
+function initialsFromName(firstName: string, email: string) {
+  const fn = (firstName || "").trim();
+  if (fn) return fn.slice(0, 1).toUpperCase();
+  const user = (email || "").split("@")[0] || "";
+  return (user.slice(0, 1) || "U").toUpperCase();
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
   const [view, setView] = useState<View>("home");
@@ -42,7 +50,6 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [weekAnchor, setWeekAnchor] = useState<Date>(new Date());
 
-  // Local state (UI)
   const [settings, setSettings] = useState<Settings | null>(null);
   const [workouts, setWorkouts] = useState<WorkoutMap>({});
   const [quote, setQuote] = useState<string>("");
@@ -51,15 +58,17 @@ export default function App() {
   const [notifEnabled, setNotifEnabled] = useState<boolean>(false);
   const [quoteLoading, setQuoteLoading] = useState<boolean>(false);
 
-  // Auth/Profile
   const [userEmail, setUserEmail] = useState<string>("");
   const [firstName, setFirstName] = useState<string>("");
 
-  // Cloud status
   const [cloudReady, setCloudReady] = useState<boolean>(false);
   const [cloudError, setCloudError] = useState<string>("");
 
-  // Debounce per salvataggio cloud mentre scrivi
+  // Profile dropdown (PORTAL)
+  const [profileOpen, setProfileOpen] = useState(false);
+  const profileBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
+
   const saveTimer = useRef<number | null>(null);
   const lastSavedRef = useRef<{ dayIdx: number; text: string } | null>(null);
 
@@ -72,21 +81,70 @@ export default function App() {
     await supabase.auth.signOut();
   }
 
-  // 1) Load LOCAL (immediato) per far vedere subito qualcosa
+  // calcola posizione del dropdown (rispetto al viewport)
+  function computeMenuPos() {
+    const btn = profileBtnRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const gap = 10;
+    const width = 320;
+    // allinea a destra del bottone, senza uscire dallo schermo
+    const left = Math.min(
+      Math.max(12, r.right - width),
+      window.innerWidth - width - 12
+    );
+    const top = r.bottom + gap;
+    setMenuPos({ top, left, width });
+  }
+
+  // close dropdown on outside click / ESC
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (!profileOpen) return;
+      const menu = document.getElementById("profile-menu-portal");
+      const btn = profileBtnRef.current;
+      const t = e.target as Node;
+
+      if (btn && btn.contains(t)) return;
+      if (menu && menu.contains(t)) return;
+
+      setProfileOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setProfileOpen(false);
+    }
+    function onResizeOrScroll() {
+      if (!profileOpen) return;
+      computeMenuPos();
+    }
+
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onResizeOrScroll);
+    window.addEventListener("scroll", onResizeOrScroll, true); // true: anche scroll di container
+
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResizeOrScroll);
+      window.removeEventListener("scroll", onResizeOrScroll, true);
+    };
+  }, [profileOpen]);
+
+  // Load LOCAL
   useEffect(() => {
     const s = loadSettings();
     setSettings(s);
     setWorkouts(loadWorkouts());
   }, []);
 
-  // 2) Carica email + first_name da profiles
+  // Load profile
   useEffect(() => {
     let cancelled = false;
 
     async function loadProfileFirstName() {
       const { data: u } = await supabase.auth.getUser();
       const uid = u.user?.id;
-
       if (!uid) {
         if (!cancelled) setFirstName("");
         return;
@@ -124,7 +182,7 @@ export default function App() {
     };
   }, []);
 
-  // 3) Sync CLOUD: carica settings+workouts da Supabase + migrazione locale->cloud
+  // Cloud sync
   useEffect(() => {
     let cancelled = false;
 
@@ -132,12 +190,10 @@ export default function App() {
       setCloudError("");
 
       try {
-        // Migra locale -> cloud se cloud vuoto
         const localS = loadSettings();
         const localW = loadWorkouts();
         await migrateLocalToCloudIfEmpty(localS, localW);
 
-        // Ora carica dal cloud come sorgente principale
         const cs = await loadSettingsCloud();
         const cw = await loadWorkoutsCloud();
 
@@ -145,17 +201,16 @@ export default function App() {
 
         if (cs) {
           setSettings(cs);
-          saveSettings(cs); // cache locale
+          saveSettings(cs);
         }
 
         setWorkouts(cw);
-        saveWorkouts(cw); // cache locale
+        saveWorkouts(cw);
 
         setCloudReady(true);
       } catch (e: any) {
         if (cancelled) return;
         setCloudError(String(e?.message ?? "Errore cloud"));
-        // resta comunque con locale
         setCloudReady(false);
       }
     })();
@@ -178,7 +233,7 @@ export default function App() {
     })();
   }, []);
 
-  // Notifiche browser (solo mentre l'app è aperta)
+  // Notification support
   useEffect(() => {
     const supported = typeof window !== "undefined" && "Notification" in window;
     if (!supported) return;
@@ -198,7 +253,7 @@ export default function App() {
     }
   }
 
-  // Promemoria “smart”: aggiorna ogni 20s
+  // Promemoria
   useEffect(() => {
     if (!settings) return;
 
@@ -225,7 +280,9 @@ export default function App() {
         if (now === settings.workoutTime && isWorkoutDay) {
           const txt = (workouts[today] ?? "").trim();
           new Notification("Allenamento di oggi", {
-            body: txt ? (txt.length > 140 ? txt.slice(0, 140) + "…" : txt) : "Apri l’app e compila la scheda.",
+            body: txt
+              ? (txt.length > 140 ? txt.slice(0, 140) + "…" : txt)
+              : "Apri l’app e compila la scheda.",
           });
         }
       }
@@ -243,11 +300,10 @@ export default function App() {
     setView("day");
   }
 
-  // Salvataggio workout: locale subito + cloud in debounce
   function updateWorkoutText(dayIdx: number, text: string) {
     const next = { ...workouts, [dayIdx]: text };
     setWorkouts(next);
-    saveWorkouts(next); // cache locale
+    saveWorkouts(next);
 
     lastSavedRef.current = { dayIdx, text };
 
@@ -259,19 +315,19 @@ export default function App() {
         await saveWorkoutDayCloud(last.dayIdx, last.text);
         setCloudReady(true);
       } catch {
-        // se fallisce, resta in locale e riproveremo al prossimo salvataggio
+        // keep local
       }
     }, 450);
   }
 
   async function saveSettingsBoth(s: Settings) {
     setSettings(s);
-    saveSettings(s); // locale
+    saveSettings(s);
     try {
       await saveSettingsCloud(s);
       setCloudReady(true);
     } catch {
-      // fallisce? resta locale
+      // keep local
     }
   }
 
@@ -293,19 +349,134 @@ export default function App() {
   const fallbackName = userEmail ? capFirst(userEmail.split("@")[0]) : "";
   const nameToShow = firstName || fallbackName;
   const welcome = nameToShow ? `Benvenuto, ${nameToShow}!` : "";
+  const avatarText = initialsFromName(firstName, userEmail);
+
+  // PORTAL: menu JSX
+  const profileMenu = profileOpen && menuPos
+    ? createPortal(
+        <div
+          id="profile-menu-portal"
+          style={{
+            position: "fixed",
+            top: menuPos.top,
+            left: menuPos.left,
+            width: menuPos.width,
+            borderRadius: 16,
+            border: "1px solid rgba(255,255,255,0.14)",
+            background: "rgba(12, 18, 28, 0.86)",
+            backdropFilter: "blur(18px)",
+            boxShadow: "0 24px 70px rgba(0,0,0,0.65)",
+            overflow: "hidden",
+            zIndex: 999999, // sopra tutto
+          }}
+          role="menu"
+        >
+          <div style={{ padding: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: 16,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontWeight: 900,
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  background: "rgba(255,255,255,0.06)",
+                  fontSize: 16,
+                }}
+              >
+                {avatarText}
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 900, letterSpacing: "-0.01em" }}>
+                  {nameToShow || "Utente"}
+                </div>
+                <div
+                  style={{
+                    color: "rgba(255,255,255,0.65)",
+                    fontSize: 12.5,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 270,
+                  }}
+                >
+                  {userEmail || "—"}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ height: 1, background: "rgba(255,255,255,0.10)", margin: "12px 0" }} />
+
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {cloudError ? (
+                <span className="badge" style={{ borderColor: "rgba(255,80,80,0.35)" }}>Sync: Locale</span>
+              ) : (
+                <span className="badge">{cloudReady ? "Sync: Supabase" : "Sync: in corso"}</span>
+              )}
+
+              {"Notification" in window ? (
+                notifEnabled ? (
+                  <span className="badge">Notifiche ON</span>
+                ) : (
+                  <button className="btn btnPrimary" onClick={enableBrowserNotifications} style={{ padding: "8px 10px" }}>
+                    Abilita notif.
+                  </button>
+                )
+              ) : (
+                <span className="badge">Notifiche non supportate</span>
+              )}
+            </div>
+          </div>
+
+          <div style={{ height: 1, background: "rgba(255,255,255,0.10)" }} />
+
+          <button
+            role="menuitem"
+            className="btn"
+            onClick={async () => {
+              setProfileOpen(false);
+              await logout();
+            }}
+            style={{
+              width: "100%",
+              border: "none",
+              borderRadius: 0,
+              background: "transparent",
+              padding: "12px 14px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              fontWeight: 900,
+            }}
+          >
+            <span style={{ display: "inline-flex", gap: 10, alignItems: "center" }}>
+              <LogoutIcon />
+              Logout
+            </span>
+            <span style={{ color: "rgba(255,255,255,0.55)", fontSize: 12 }}>↩</span>
+          </button>
+        </div>,
+        document.body
+      )
+    : null;
 
   return (
     <div className={"container hasTabbar"}>
-      <header className="topbar">
+      <header className="topbar" style={{ position: "relative", zIndex: 10 }}>
         <div className="brand">
           <div className="logo" />
-          <div>
+          <div style={{ minWidth: 0 }}>
             <div className="h1">Gym Schede</div>
             <div className="sub">Calendario interno • schede settimanali • motivazione</div>
 
             {welcome ? (
               <div className="sub" style={{ marginTop: 4 }}>
-                <span style={{ fontWeight: 900, color: "rgba(255,255,255,0.92)" }}>{welcome}</span>
+                <span style={{ fontWeight: 900, color: "rgba(255,255,255,0.92)" }}>
+                  {welcome}
+                </span>
               </div>
             ) : null}
           </div>
@@ -316,13 +487,44 @@ export default function App() {
             {quoteLoading ? "Caricamento..." : "Nuova frase"}
           </button>
 
-          <button className="btn" onClick={() => navigate("home")}>Home</button>
-          <button className="btn" onClick={() => navigate("calendar")}>Calendario</button>
-          <button className="btn" onClick={() => navigate("settings")}>Impostazioni</button>
-
-          <button className="btn" onClick={logout}>Logout</button>
+          <button
+            ref={profileBtnRef}
+            className="btn"
+            onClick={() => {
+              if (!profileOpen) {
+                computeMenuPos();
+                setProfileOpen(true);
+              } else {
+                setProfileOpen(false);
+              }
+            }}
+            aria-haspopup="menu"
+            aria-expanded={profileOpen}
+            style={{ display: "inline-flex", alignItems: "center", gap: 10 }}
+          >
+            <span
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 12,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontWeight: 900,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "rgba(255,255,255,0.06)",
+              }}
+            >
+              {avatarText}
+            </span>
+            <span style={{ fontWeight: 900 }}>Profilo</span>
+            <ChevronDown />
+          </button>
         </div>
       </header>
+
+      {/* Portal dropdown rendered at body level */}
+      {profileMenu}
 
       {cloudError ? (
         <div className="banner" style={{ borderColor: "rgba(255,80,80,0.35)" }}>
@@ -341,17 +543,6 @@ export default function App() {
             <div className="bannerText">{banner}</div>
           </div>
           <div className="row">
-            {"Notification" in window ? (
-              notifEnabled ? (
-                <span className="badge">Notifiche ON</span>
-              ) : (
-                <button className="btn btnPrimary" onClick={enableBrowserNotifications}>
-                  Abilita notif.
-                </button>
-              )
-            ) : (
-              <span className="badge">Notifiche non supportate</span>
-            )}
             <span className="badge">{cloudReady ? "Sync: Supabase" : "Sync: Locale"}</span>
           </div>
         </div>
@@ -372,7 +563,9 @@ export default function App() {
                 <div className="cardHeader">
                   <div>
                     <div className="title">Settimana</div>
-                    <div className="muted">Tocca un giorno per aprire la scheda. I giorni di allenamento sono evidenziati.</div>
+                    <div className="muted">
+                      Tocca un giorno per aprire la scheda. I giorni di allenamento sono evidenziati.
+                    </div>
                   </div>
                   <span className="badge">Oggi: {dayNamesLong[todayIndex()]}</span>
                 </div>
@@ -392,7 +585,9 @@ export default function App() {
                         onClick={() => goDay(i)}
                         role="button"
                         aria-label={`Apri ${dayNamesLong[i]}`}
-                        style={{ outline: isToday ? "2px solid rgba(34,197,94,0.35)" : "none" }}
+                        style={{
+                          outline: isToday ? "2px solid rgba(34,197,94,0.35)" : "none",
+                        }}
                       >
                         <div className="dayTop">
                           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -435,12 +630,9 @@ export default function App() {
 
                 <div className="sep" />
 
-                <div className="title">Vai al calendario</div>
+                <div className="title">Tip</div>
                 <div className="muted" style={{ marginTop: 10 }}>
-                  Se vuoi scorrere le settimane e scegliere una data, usa la tab “Calendario”.
-                </div>
-                <div className="row" style={{ marginTop: 10 }}>
-                  <button className="btn" onClick={() => navigate("calendar")}>Calendario</button>
+                  Usa la tabbar in basso per passare a Calendario e Impostazioni.
                 </div>
               </aside>
             </div>
@@ -454,9 +646,15 @@ export default function App() {
                   <div className="muted">Scorri le settimane e seleziona un giorno.</div>
                 </div>
                 <div className="row">
-                  <button className="btn" onClick={() => setWeekAnchor(addDays(weekAnchor, -7))}>←</button>
-                  <button className="btn" onClick={() => setWeekAnchor(new Date())}>Oggi</button>
-                  <button className="btn" onClick={() => setWeekAnchor(addDays(weekAnchor, 7))}>→</button>
+                  <button className="btn" onClick={() => setWeekAnchor(addDays(weekAnchor, -7))}>
+                    ←
+                  </button>
+                  <button className="btn" onClick={() => setWeekAnchor(new Date())}>
+                    Oggi
+                  </button>
+                  <button className="btn" onClick={() => setWeekAnchor(addDays(weekAnchor, 7))}>
+                    →
+                  </button>
                 </div>
               </div>
 
@@ -504,9 +702,7 @@ export default function App() {
                       {dayNamesLong[selDateWeekdayIdx]} • {formatDDMM(selectedDate)} —{" "}
                       {selIsWorkoutDay ? "Allenamento" : "Riposo"}
                     </div>
-                    <div className="muted">
-                      Scheda associata al giorno della settimana (sincronizzata). In futuro possiamo aggiungere schede “per data”.
-                    </div>
+                    <div className="muted">Scheda associata al giorno della settimana (sincronizzata).</div>
                   </div>
                   <button className="btn btnPrimary" onClick={() => goDay(selDateWeekdayIdx)}>
                     Apri scheda
@@ -552,7 +748,7 @@ export default function App() {
 
       {isConfigured ? <MobileTabbar tab={tab} onTab={navigate} /> : null}
 
-      <Footer cloudReady={cloudReady} />
+      <Footer cloudReady={cloudReady && !cloudError} />
     </div>
   );
 }
@@ -562,19 +758,19 @@ function MobileTabbar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
     <div className="tabbar">
       <div className="tabbarInner">
         <button className={"tab " + (tab === "home" ? "tabOn" : "")} onClick={() => onTab("home")}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center" }}>
             {tab === "home" ? <span className="tabDot" /> : null}
             <span>Home</span>
           </div>
         </button>
         <button className={"tab " + (tab === "calendar" ? "tabOn" : "")} onClick={() => onTab("calendar")}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center" }}>
             {tab === "calendar" ? <span className="tabDot" /> : null}
             <span>Calendario</span>
           </div>
         </button>
         <button className={"tab " + (tab === "settings" ? "tabOn" : "")} onClick={() => onTab("settings")}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center" }}>
             {tab === "settings" ? <span className="tabDot" /> : null}
             <span>Impostazioni</span>
           </div>
@@ -859,7 +1055,42 @@ function SettingsScreen(props: {
   );
 }
 
-/* ===== Footer Icons (SVG) ===== */
+/* ===== Small icons ===== */
+
+function ChevronDown() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M7 10l5 5 5-5"
+        stroke="rgba(255,255,255,0.75)"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function LogoutIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M10 7V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-1"
+        stroke="rgba(255,255,255,0.75)"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path d="M3 12h10" stroke="rgba(255,255,255,0.75)" strokeWidth="2" strokeLinecap="round" />
+      <path
+        d="M7 8l-4 4 4 4"
+        stroke="rgba(255,255,255,0.75)"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 
 function GitHubIcon() {
   return (
