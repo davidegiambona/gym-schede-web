@@ -1,13 +1,22 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
 import App from "./App";
-import AuthGate from "./AuthGate";
 import "./styles.css";
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <AuthGate>
-      <App />
-    </AuthGate>
-  </React.StrictMode>
+import { registerSW } from "virtual:pwa-register";
+
+registerSW({
+  immediate: true,
+  onOfflineReady() {
+    console.log("✅ App pronta offline");
+  },
+  onNeedRefresh() {
+    console.log("🔄 Aggiornamento disponibile");
+  }
+});
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>
 );
