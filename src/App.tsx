@@ -586,10 +586,10 @@ function MobileTabbar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
 
 function Footer({ cloudReady }: { cloudReady: boolean }) {
   const links = {
-    github: "https://github.com/TUOUSERNAME",
-    instagram: "https://instagram.com/TUOUSERNAME",
-    email: "mailto:tuaemail@example.com",
-    portfolio: "https://tuosito.com",
+    github: "https://github.com/davidegiambona",
+    instagram: "https://instagram.com/davide_giambona",
+    email: "mailto:dgiambona82@gmail.com",
+    portfolio: "https://davidegiambona.github.io/personal-portfolio/",
   };
 
   return (

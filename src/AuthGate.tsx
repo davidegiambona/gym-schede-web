@@ -256,11 +256,11 @@ function AuthScreen() {
             <div className="row" style={{ gap: 12 }}>
               <div style={{ flex: 1 }}>
                 <div className="title">Nome</div>
-                <input className="input" value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Es. Davide" />
+                <input className="input" value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Es. Mario" />
               </div>
               <div style={{ flex: 1 }}>
                 <div className="title">Cognome</div>
-                <input className="input" value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Es. Giambona" />
+                <input className="input" value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Es. Rossi" />
               </div>
             </div>
 
