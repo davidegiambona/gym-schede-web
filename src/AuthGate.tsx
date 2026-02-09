@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabaseClient";
 import { NATIONALITIES } from "./lib/nationalities";
+import { resetAll } from "./lib/storage";
 
 type PendingProfile = {
   email: string;
   first_name: string;
   last_name: string;
-  birth_date: string;     // YYYY-MM-DD
+  birth_date: string;
   nationality: string;
   created_at: number;
 };
@@ -16,7 +17,6 @@ const PENDING_KEY = "gym.pendingProfile.v1";
 function savePendingProfile(p: PendingProfile) {
   localStorage.setItem(PENDING_KEY, JSON.stringify(p));
 }
-
 function loadPendingProfile(): PendingProfile | null {
   const raw = localStorage.getItem(PENDING_KEY);
   if (!raw) return null;
@@ -26,7 +26,6 @@ function loadPendingProfile(): PendingProfile | null {
     return null;
   }
 }
-
 function clearPendingProfile() {
   localStorage.removeItem(PENDING_KEY);
 }
@@ -35,15 +34,11 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState<any>(null);
 
-  // Se c'è un profilo pending e ora siamo loggati, prova a scriverlo su Supabase
   async function tryFlushPendingProfile(currentSession: any) {
     const pending = loadPendingProfile();
     const uid = currentSession?.user?.id;
     const email = currentSession?.user?.email;
-
     if (!pending || !uid || !email) return;
-
-    // Se il pending è di un'altra email, non fare nulla
     if (pending.email.toLowerCase() !== String(email).toLowerCase()) return;
 
     const payload = {
@@ -60,26 +55,59 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   useEffect(() => {
+    let cancelled = false;
+
+    // 1) session iniziale
     supabase.auth.getSession().then(async ({ data }) => {
+      if (cancelled) return;
       setSession(data.session);
       setLoading(false);
-      if (data.session) await tryFlushPendingProfile(data.session);
+
+      // SE NON c'è sessione => pulisci cache locale per sicurezza
+      if (!data.session) {
+        resetAll();
+      } else {
+        await tryFlushPendingProfile(data.session);
+      }
     });
 
+    // 2) ascolta cambi auth
     const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
+      if (cancelled) return;
       setSession(s);
       setLoading(false);
-      if (s) await tryFlushPendingProfile(s);
+
+      if (!s) {
+        // logout / sessione sparita => pulisci TUTTO locale
+        resetAll();
+        clearPendingProfile();
+      } else {
+        await tryFlushPendingProfile(s);
+      }
     });
 
-    return () => sub.subscription.unsubscribe();
+    return () => {
+      cancelled = true;
+      sub.subscription.unsubscribe();
+    };
   }, []);
 
-  if (loading) return <div className="container"><div className="card">Caricamento…</div></div>;
+  if (loading) {
+    return (
+      <div className="container">
+        <div className="card">Caricamento…</div>
+      </div>
+    );
+  }
+
   if (!session) return <AuthScreen />;
 
   return <>{children}</>;
 }
+
+/* ============================
+   AUTH SCREEN
+   ============================ */
 
 function AuthScreen() {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
@@ -87,13 +115,11 @@ function AuthScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  // profilo
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
-  const [birthDate, setBirthDate] = useState(""); // YYYY-MM-DD
+  const [birthDate, setBirthDate] = useState("");
   const [nationality, setNationality] = useState("");
 
-  // dropdown scorrevole + ricerca
   const [countryQuery, setCountryQuery] = useState("");
   const filteredNationalities = useMemo(() => {
     const q = countryQuery.trim().toLowerCase();
@@ -139,7 +165,7 @@ function AuthScreen() {
     validateCommon();
     validateProfile();
 
-    // SALVIAMO SEMPRE pending, così anche con conferma email ON non perdi dati
+    // salva pending (così anche con conferma email attiva non perdi dati)
     savePendingProfile({
       email: email.trim(),
       first_name: firstName.trim(),
@@ -152,26 +178,20 @@ function AuthScreen() {
     const { data, error } = await supabase.auth.signUp({
       email: email.trim(),
       password,
-      // opzionale: redirect al tuo dominio quando confermi (lo metteremo quando hostiamo)
-      // options: { emailRedirectTo: window.location.origin }
     });
-
     if (error) throw error;
 
-    // Se Supabase ti dà una sessione già valida (dipende dalle impostazioni), allora scriviamo subito anche su DB
+    // se sessione presente, prova a salvare subito
     if (data.session) {
       try {
         await upsertProfileForLoggedUser();
         clearPendingProfile();
       } catch {
-        // Se fallisce, va bene: verrà scritto al primo login (pending è già salvato)
+        // verrà salvato al login
       }
     }
 
-    setMsg(
-      "Account creato! Se la conferma email è attiva, controlla la mail e poi fai login. " +
-      "I dati del profilo verranno salvati automaticamente al primo accesso."
-    );
+    setMsg("Account creato. Ora fai login (o conferma email se attiva).");
     setMode("signin");
   }
 
@@ -182,10 +202,9 @@ function AuthScreen() {
       email: email.trim(),
       password,
     });
-
     if (error) throw error;
 
-    // Dopo login sei autenticato: se esiste pending per questa email, scrivilo su profiles
+    // dopo login: se esiste pending per questa email, lo scriviamo su profiles
     const pending = loadPendingProfile();
     const uid = data.user?.id;
     const userEmail = data.user?.email;
@@ -202,15 +221,6 @@ function AuthScreen() {
       const { error: upErr } = await supabase.from("profiles").upsert(payload, { onConflict: "id" });
       if (!upErr) clearPendingProfile();
     }
-
-    // Se l’utente ha compilato i campi anche in questa schermata (caso raro), aggiorniamo comunque
-    if (uid && (firstName || lastName || birthDate || nationality)) {
-      try {
-        await upsertProfileForLoggedUser();
-      } catch {
-        // non blocchiamo il login
-      }
-    }
   }
 
   async function submit() {
@@ -221,11 +231,7 @@ function AuthScreen() {
       else await signin();
     } catch (e: any) {
       const m = String(e?.message ?? "Errore");
-      if (m.toLowerCase().includes("email not confirmed")) {
-        setMsg("Email non confermata: conferma dalla mail oppure disattiva la conferma nelle impostazioni Supabase.");
-      } else {
-        setMsg(m);
-      }
+      setMsg(m);
     } finally {
       setBusy(false);
     }
@@ -237,7 +243,9 @@ function AuthScreen() {
         <div className="cardHeader">
           <div>
             <div className="title">{mode === "signin" ? "Accedi" : "Crea account"}</div>
-            <div className="muted">Sincronizza schede e calendario su tutti i dispositivi.</div>
+            <div className="muted">
+              Per vedere qualsiasi dato devi essere autenticato.
+            </div>
           </div>
           <div className="row">
             <button className={"btn " + (mode === "signin" ? "btnPrimary" : "")} disabled={busy} onClick={() => setMode("signin")}>
@@ -256,11 +264,11 @@ function AuthScreen() {
             <div className="row" style={{ gap: 12 }}>
               <div style={{ flex: 1 }}>
                 <div className="title">Nome</div>
-                <input className="input" value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Es. Mario" />
+                <input className="input" value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Es. Davide" />
               </div>
               <div style={{ flex: 1 }}>
                 <div className="title">Cognome</div>
-                <input className="input" value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Es. Rossi" />
+                <input className="input" value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Es. Giambona" />
               </div>
             </div>
 
